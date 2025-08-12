@@ -1,6 +1,6 @@
-fastapi==0.111.0
-uvicorn==0.30.1
-requests==2.32.3
-python-dateutil==2.9.0.post0
-reportlab==4.2.2
-python-telegram-bot==20.7
+fastapi
+uvicorn
+python-telegram-bot==20.3
+reportlab
+python-dateutil
+requests
