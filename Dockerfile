@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# System libraries required by WeasyPrint on Debian Bookworm
+# WeasyPrint runtime deps for Debian Bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libpango-1.0-0 \
