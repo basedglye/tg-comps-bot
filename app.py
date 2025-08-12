@@ -295,11 +295,15 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_markdown_v2(msg)
 
 def run_bot():
-    # Clear webhook via HTTP (sync) to avoid conflicts, drop pending updates
+    # Clear webhook and cloud session; drop pending updates to avoid conflicts
     try:
         requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
             params={"drop_pending_updates": "true"},
+            timeout=10
+        )
+        requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/logOut",
             timeout=10
         )
     except Exception:
@@ -309,11 +313,11 @@ def run_bot():
     application.add_handler(CommandHandler("comp", comp_cmd))
     application.add_handler(CommandHandler("about", about_cmd))
 
-    # Use the sync variant so PTB manages the event loop (avoids 'Cannot close a running event loop')
+    # Start polling; PTB manages the loop
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
-        stop_signals=None  # safer in some container runtimes
+        stop_signals=None
     )
 
 if __name__ == "__main__":
