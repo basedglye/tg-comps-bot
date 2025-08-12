@@ -1,20 +1,22 @@
-import os, re, io, math, statistics, tempfile, threading, requests
+import os, re, io, math, statistics, tempfile, threading, requests, urllib.parse, asyncio
 from datetime import datetime, timezone
 from dateutil import parser as dparser
 
-from fastapi import FastAPI, Body
-from fastapi.responses import JSONResponse
-import uvicorn
-
-from telegram import Update, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-# ---- PDF (ReportLab) ----
+# PDF (ReportLab)
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from reportlab.lib.units import inch
+
+# API
+from fastapi import FastAPI, Body
+from fastapi.responses import JSONResponse
+import uvicorn
+
+# Telegram
+from telegram import Update, InputFile
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # -------------------------
 # Config via ENV VARIABLES
@@ -67,6 +69,32 @@ def verify_true_cash(comp):
     # Hook for Clerk deed/mortgage check — returns Pending in MVP
     return {"cash_status":"Pending"}
 
+def _guess_county_from_address(address:str) -> str:
+    # very light heuristic for FL demo (improve later)
+    a = address.lower()
+    if "boca raton" in a or "334" in a:
+        return "Palm Beach County"
+    if "fort lauderdale" in a or "broward" in a or a.endswith("333"):
+        return "Broward County"
+    return "County Appraiser"
+
+def make_links(address: str):
+    """Generate Zillow + County Appraiser links (query-style)."""
+    addr_encoded = urllib.parse.quote(address)
+    # Zillow deep link via query (stable)
+    zillow_url = f"https://www.zillow.com/homes/{addr_encoded}_rb/"
+
+    county = _guess_county_from_address(address)
+    if county == "Palm Beach County":
+        # PAPA doesn't have a stable address param; use a Google query scoped to the site.
+        county_url = "https://www.google.com/search?q=" + urllib.parse.quote(f"site:pbcgov.org papa {address}")
+    elif county == "Broward County":
+        county_url = "https://www.bcpa.net/RecAddr.asp?addr=" + urllib.parse.quote(address)
+    else:
+        # Generic Google search fallback
+        county_url = "https://www.google.com/search?q=" + urllib.parse.quote(f"{address} county property appraiser")
+    return zillow_url, county_url
+
 # -------------------------
 # PDF generator (ReportLab)
 # -------------------------
@@ -81,10 +109,15 @@ def generate_pdf(subject, comps, arv, condition, rehab_cost, assignment_fee, mao
     meta = f"Condition: {condition.title()} • Assignment Fee: ${assignment_fee:,.0f}"
     summary = f"ARV: ${arv:,.0f} • Rehab: ${rehab_cost:,.0f} • Dispo Ask: ${dispo_price:,.0f}"
 
+    zillow_url, county_url = make_links(subject["address"])
+
     story += [
         Paragraph(title, styles['Title']),
         Paragraph(sub, styles['Normal']),
         Paragraph(meta, styles['Normal']),
+        Spacer(1, 0.1*inch),
+        Paragraph(f"🔗 Zillow: <a href='{zillow_url}'>{zillow_url}</a>", styles['Normal']),
+        Paragraph(f"🏛 County Appraiser: <a href='{county_url}'>{county_url}</a>", styles['Normal']),
         Spacer(1, 0.2*inch),
         Paragraph(summary, styles['Heading3']),
         Spacer(1, 0.2*inch),
@@ -100,11 +133,8 @@ def generate_pdf(subject, comps, arv, condition, rehab_cost, assignment_fee, mao
             c.get("sold_date",""),
             f"${c.get('sold_price',0):,.0f}",
             f"${(c.get('ppsf') or 0):,.0f}",
-            c.get("beds",""),
-            c.get("baths",""),
-            f"{c.get('sqft',''):,}" if c.get("sqft") else "",
-            c.get("why",""),
-            c.get("cash_status","")
+            c.get("beds",""), c.get("baths",""), f"{c.get('sqft',''):,}" if c.get("sqft") else "",
+            c.get("why",""), c.get("cash_status","")
         ])
     t = Table(comp_rows, repeatRows=1)
     t.setStyle(TableStyle([
@@ -263,16 +293,31 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• *MAO tiers*: aggressive 65%, standard 70%, hot 75% (applied to ARV).\n"
         "• *Defaults* if you omit flags: MAO=aggressive, condition=fair, fee=$20,000.\n"
         "• *Rehab $/sf*: Excellent $20, Fair $42.5, Poor $85 (× subject sqft).\n"
-        "• *Command*: `/comp <address> [--condition excellent|fair|poor] [--fee 20000] [--mao aggressive|standard|hot]`"
+        "• *Outputs*: Zillow + County Appraiser links, comps table, ARV, rehab, MAO tiers, dispo ask."
     )
     await update.message.reply_markdown_v2(msg)
 
 def run_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("comp", comp_cmd))
-    app.add_handler(CommandHandler("about", about_cmd))
-    app.run_polling()
+    # Build the application
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("comp", comp_cmd))
+    application.add_handler(CommandHandler("about", about_cmd))
+
+    # Ensure no webhook is set (avoids "terminated by other getUpdates request")
+    async def _run():
+        try:
+            await application.bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            pass
+        await application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+
+    # Run the async polling loop
+    asyncio.run(_run())
 
 if __name__ == "__main__":
+    # Start FastAPI in a background thread, then the bot
     threading.Thread(target=run_api, daemon=True).start()
     run_bot()
