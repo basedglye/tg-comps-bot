@@ -1,0 +1,22 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "name": "TG Comps Bot",
+  "plugins": [],
+  "build": {
+    "builder": "DOCKERFILE"
+  },
+  "deploy": {
+    "startCommand": "python app.py"
+  },
+  "variables": {
+    "PORT": {
+      "description": "Port the app listens on",
+      "defaultValue": "8000",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram bot token from @BotFather",
+      "required": true
+    }
+  }
+}
