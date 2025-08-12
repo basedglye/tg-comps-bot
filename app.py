@@ -1,4 +1,4 @@
-import os, re, io, math, statistics, tempfile, threading, requests, urllib.parse, asyncio
+import os, re, io, math, statistics, tempfile, threading, requests, urllib.parse
 from datetime import datetime, timezone
 from dateutil import parser as dparser
 
@@ -70,28 +70,25 @@ def verify_true_cash(comp):
     return {"cash_status":"Pending"}
 
 def _guess_county_from_address(address:str) -> str:
-    # very light heuristic for FL demo (improve later)
+    # light heuristic for demo; refine later
     a = address.lower()
-    if "boca raton" in a or "334" in a:
+    if "boca raton" in a or "palm beach" in a:
         return "Palm Beach County"
-    if "fort lauderdale" in a or "broward" in a or a.endswith("333"):
+    if "fort lauderdale" in a or "broward" in a:
         return "Broward County"
     return "County Appraiser"
 
 def make_links(address: str):
     """Generate Zillow + County Appraiser links (query-style)."""
     addr_encoded = urllib.parse.quote(address)
-    # Zillow deep link via query (stable)
     zillow_url = f"https://www.zillow.com/homes/{addr_encoded}_rb/"
 
     county = _guess_county_from_address(address)
     if county == "Palm Beach County":
-        # PAPA doesn't have a stable address param; use a Google query scoped to the site.
         county_url = "https://www.google.com/search?q=" + urllib.parse.quote(f"site:pbcgov.org papa {address}")
     elif county == "Broward County":
         county_url = "https://www.bcpa.net/RecAddr.asp?addr=" + urllib.parse.quote(address)
     else:
-        # Generic Google search fallback
         county_url = "https://www.google.com/search?q=" + urllib.parse.quote(f"{address} county property appraiser")
     return zillow_url, county_url
 
@@ -298,24 +295,26 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_markdown_v2(msg)
 
 def run_bot():
-    # Build the application
+    # Clear webhook via HTTP (sync) to avoid conflicts, drop pending updates
+    try:
+        requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+            params={"drop_pending_updates": "true"},
+            timeout=10
+        )
+    except Exception:
+        pass
+
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("comp", comp_cmd))
     application.add_handler(CommandHandler("about", about_cmd))
 
-    # Ensure no webhook is set (avoids "terminated by other getUpdates request")
-    async def _run():
-        try:
-            await application.bot.delete_webhook(drop_pending_updates=True)
-        except Exception:
-            pass
-        await application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-        )
-
-    # Run the async polling loop
-    asyncio.run(_run())
+    # Use the sync variant so PTB manages the event loop (avoids 'Cannot close a running event loop')
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        stop_signals=None  # safer in some container runtimes
+    )
 
 if __name__ == "__main__":
     # Start FastAPI in a background thread, then the bot
