@@ -21,7 +21,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # -------------------------
 # Config via ENV VARIABLES
 # -------------------------
-BOT_TOKEN = os.getenv("8254381110:AAFj6WSTE_q6W4IDw5J2OJy6LU_AVQJmbb8")           # set in Railway Variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")           # set in Railway Variables
 PORT      = int(os.getenv("PORT", "8000"))   # set to 8000 in Railway Variables
 
 if not BOT_TOKEN:
