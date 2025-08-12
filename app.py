@@ -1,8 +1,6 @@
 import os, re, io, math, statistics, tempfile, threading, requests
 from datetime import datetime, timezone
 from dateutil import parser as dparser
-from jinja2 import Template
-from weasyprint import HTML
 
 from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
@@ -10,6 +8,13 @@ import uvicorn
 
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# ---- PDF (ReportLab) ----
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
+from reportlab.lib.units import inch
 
 # -------------------------
 # Config via ENV VARIABLES
@@ -62,40 +67,66 @@ def verify_true_cash(comp):
     # Hook for Clerk deed/mortgage check — returns Pending in MVP
     return {"cash_status":"Pending"}
 
+# -------------------------
+# PDF generator (ReportLab)
+# -------------------------
 def generate_pdf(subject, comps, arv, condition, rehab_cost, assignment_fee, mao_rows, dispo_price):
-    template = Template("""
-    <h1>Comp Packet</h1>
-    <h2>{{ subject.address }}</h2>
-    <p>{{ subject.beds }} bd • {{ subject.baths }} ba • {{ "{:,}".format(subject.sqft or 0) }} sqft • Yr {{ subject.year or "—" }}</p>
-    <p>Condition: <b>{{ condition|title }}</b> • Assignment Fee: <b>{{ "${:,.0f}".format(assignment_fee) }}</b></p>
-    <h3>ARV: {{ "${:,.0f}".format(arv) }} • Rehab: {{ "${:,.0f}".format(rehab_cost) }} • Dispo Ask: {{ "${:,.0f}".format(dispo_price) }}</h3>
-    <h3>Comps</h3>
-    <table border="1" cellspacing="0" cellpadding="4">
-      <tr><th>Score</th><th>Address</th><th>Sold</th><th>Price</th><th>$/sf</th><th>Beds</th><th>Baths</th><th>Sqft</th><th>Why</th><th>Cash?</th></tr>
-      {% for c in comps %}
-      <tr>
-        <td>{{ c.score }}</td>
-        <td>{{ c.address }}</td>
-        <td>{{ c.sold_date }}</td>
-        <td>{{ "${:,.0f}".format(c.sold_price) }}</td>
-        <td>{{ "${:,.0f}".format(c.ppsf) }}</td>
-        <td>{{ c.beds }}</td><td>{{ c.baths }}</td><td>{{ "{:,}".format(c.sqft or 0) }}</td>
-        <td>{{ c.why }}</td>
-        <td>{{ c.cash_status }}</td>
-      </tr>
-      {% endfor %}
-    </table>
-    <h3>MAO Tiers ({{ condition|title }})</h3>
-    <table border="1" cellspacing="0" cellpadding="4">
-      <tr><th>Tier</th><th>Buyer Max</th><th>Your MAO (fee in)</th></tr>
-      {% for row in mao_rows %}
-      <tr><td>{{ row.tier }}</td><td>{{ "${:,.0f}".format(row.buyer_max) }}</td><td>{{ "${:,.0f}".format(row.your_mao) }}</td></tr>
-      {% endfor %}
-    </table>
-    """)
-    html = template.render(**locals())
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    HTML(string=html).write_pdf(tmp.name)
+    doc = SimpleDocTemplate(tmp.name, pagesize=A4, title="Comp Packet")
+    styles = getSampleStyleSheet()
+    story = []
+
+    title = f"Comp Packet – {subject['address']}"
+    sub = f"{subject.get('beds','')} bd • {subject.get('baths','')} ba • {subject.get('sqft','')} sqft • Yr {subject.get('year','—')}"
+    meta = f"Condition: {condition.title()} • Assignment Fee: ${assignment_fee:,.0f}"
+    summary = f"ARV: ${arv:,.0f} • Rehab: ${rehab_cost:,.0f} • Dispo Ask: ${dispo_price:,.0f}"
+
+    story += [
+        Paragraph(title, styles['Title']),
+        Paragraph(sub, styles['Normal']),
+        Paragraph(meta, styles['Normal']),
+        Spacer(1, 0.2*inch),
+        Paragraph(summary, styles['Heading3']),
+        Spacer(1, 0.2*inch),
+        Paragraph("Comps", styles['Heading3'])
+    ]
+
+    comp_hdr = ["Score","Address","Sold","Price","$/sf","Beds","Baths","Sqft","Why","Cash?"]
+    comp_rows = [comp_hdr]
+    for c in comps:
+        comp_rows.append([
+            c.get("score",""),
+            c.get("address",""),
+            c.get("sold_date",""),
+            f"${c.get('sold_price',0):,.0f}",
+            f"${(c.get('ppsf') or 0):,.0f}",
+            c.get("beds",""),
+            c.get("baths",""),
+            f"{c.get('sqft',''):,}" if c.get("sqft") else "",
+            c.get("why",""),
+            c.get("cash_status","")
+        ])
+    t = Table(comp_rows, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0), colors.lightgrey),
+        ("GRID",(0,0),(-1,-1), 0.25, colors.grey),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("FONTSIZE",(0,0),(-1,-1),8),
+    ]))
+    story += [t, Spacer(1, 0.2*inch), Paragraph("MAO Tiers", styles['Heading3'])]
+
+    mao_hdr = ["Tier","Buyer Max","Your MAO (fee in)"]
+    mao_rows_tbl = [mao_hdr] + [[r["tier"], f"${r['buyer_max']:,.0f}", f"${r['your_mao']:,.0f}"] for r in mao_rows]
+    t2 = Table(mao_rows_tbl, repeatRows=1)
+    t2.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0), colors.lightgrey),
+        ("GRID",(0,0),(-1,-1), 0.25, colors.grey),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("FONTSIZE",(0,0),(-1,-1),9),
+    ]))
+    story.append(t2)
+
+    doc.build(story)
     return tmp.name
 
 # -------------------------
@@ -144,11 +175,9 @@ def run_comps(payload=Body(...)):
         your_mao  = buyer_max - assignment_fee
         mao_rows.append({"tier": f"{int(t*100)}%", "buyer_max": buyer_max, "your_mao": your_mao})
 
-    # cash lens (proxy)
     cash_ppsf = median_ppsf * 0.95
     dispo_price = round(cash_ppsf * (subject["sqft"] or 0))
 
-    # choose highlight MAO for summary
     tier_map = {"aggressive":"65%", "standard":"70%", "hot":"75%"}
     highlight_label = tier_map.get(highlight, "65%")
     highlight_idx = {"65%":0, "70%":1, "75%":2}[highlight_label]
@@ -169,7 +198,7 @@ def run_api():
 # -------------------------
 def _parse_flags(text:str):
     out={}
-    # accept optional flags; if missing, defaults apply (aggressive/fair/20000)
+    # optional flags; if missing, defaults apply (aggressive/fair/20000)
     for k in ["fee","condition","beds","baths","sqft","year","mao"]:
         m=re.search(rf"--{k}\s+([^\-][\S ]+?)(?=\s--|$)", text, re.I)
         if m: out[k.lower()]=m.group(1).strip()
@@ -188,13 +217,11 @@ async def comp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     addr_and_flags = parts[1]
     fl = _parse_flags(addr_and_flags)
 
-    # Address is everything with flags removed
     address = re.sub(r"--\w+\s+[^\-][\S ]+?(?=\s--|$)", "", addr_and_flags).strip().rstrip(",")
     if not address:
         await update.message.reply_text("Please include an address after /comp.")
         return
 
-    # Defaults kick in if missing
     condition = (fl.get("condition") or "fair").lower()
     fee = int(float(fl.get("fee") or 20000))
     highlight = (fl.get("mao") or "aggressive").lower()
