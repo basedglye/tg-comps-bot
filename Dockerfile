@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# system deps for WeasyPrint
+# system deps for WeasyPrint (PDF)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libcairo2 pango-graphite libpango-1.0-0 libpangocairo-1.0-0 \
     libgdk-pixbuf-2.0-0 libffi-dev fonts-dejavu-core fonts-dejavu-extra \
