@@ -14,14 +14,12 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # -------------------------
 # Config via ENV VARIABLES
 # -------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")           # <-- set this in Railway Variables
-PORT      = int(os.getenv("PORT", "8000"))   # <-- set to 8000 in Railway Variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")           # set in Railway Variables
+PORT      = int(os.getenv("PORT", "8000"))   # set to 8000 in Railway Variables
 
-# Fail fast if missing
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Add it in Railway → Variables.")
 
-# Rehab $/sf by condition + MAO tiers
 REHAB_PSF = {"excellent": 20.0, "fair": 42.5, "poor": 85.0}
 MAO_TIERS = [0.65, 0.70, 0.75]
 
@@ -50,10 +48,7 @@ def comp_reasons(subj, comp):
     return " • ".join(r[:3])
 
 def fetch_portal_comps(address:str):
-    """
-    Stub data so the flow deploys cleanly.
-    Replace with your live adapters (PropStream export, Redfin/Zillow parse, county sales, etc.).
-    """
+    # Stub data so flow deploys cleanly; replace with live fetchers later.
     return [
         {"address":"17267 Ventana Dr, Boca Raton, FL 33487","sold_price":650000,"sold_date":"2025-06-30","beds":3,"baths":2,"sqft":1820,"year":1992},
         {"address":"17165 Balboa Point Way, Boca Raton, FL 33487","sold_price":800000,"sold_date":"2025-07-07","beds":3,"baths":2.5,"sqft":2304,"year":1992},
@@ -190,7 +185,6 @@ async def comp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
     }
 
-    # Call our local API inside the same container
     base = f"http://127.0.0.1:{PORT}"
     r = requests.post(f"{base}/run_comps", json=payload, timeout=60)
     data = r.json()
@@ -204,12 +198,22 @@ async def comp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "summary" in data:
         await update.message.reply_text(data["summary"])
 
+async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "📘 *About CompsMAObot*\n"
+        "• *MAO Tiers*: Challenge 65%, Standard 70%, Hot 75% (applied to ARV).\n"
+        "• *Rehab $/sf by condition*: Excellent $20, Fair $42.5, Poor $85 (multiplied by subject sqft).\n"
+        "• *Cash lens*: Dispo ask starts ~5% under retail PPSF until TRUE CASH deeds are confirmed.\n"
+        "• *Command*: `/comp <address> [--condition excellent|fair|poor --fee 20000]`"
+    )
+    await update.message.reply_markdown_v2(msg)
+
 def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("comp", comp_cmd))
+    app.add_handler(CommandHandler("about", about_cmd))
     app.run_polling()
 
 if __name__ == "__main__":
-    # Run API in a background thread, then start the bot
     threading.Thread(target=run_api, daemon=True).start()
     run_bot()
