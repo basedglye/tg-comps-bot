@@ -20,8 +20,9 @@ PORT      = int(os.getenv("PORT", "8000"))   # set to 8000 in Railway Variables
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Add it in Railway → Variables.")
 
+# Rehab $/sf by condition + MAO tiers
 REHAB_PSF = {"excellent": 20.0, "fair": 42.5, "poor": 85.0}
-MAO_TIERS = [0.65, 0.70, 0.75]
+MAO_TIERS = [0.65, 0.70, 0.75]  # aggressive, standard, hot
 
 # -------------------------
 # Helpers
@@ -48,7 +49,9 @@ def comp_reasons(subj, comp):
     return " • ".join(r[:3])
 
 def fetch_portal_comps(address:str):
-    # Stub data so flow deploys cleanly; replace with live fetchers later.
+    """
+    Stub data so flow deploys cleanly; replace with live fetchers later.
+    """
     return [
         {"address":"17267 Ventana Dr, Boca Raton, FL 33487","sold_price":650000,"sold_date":"2025-06-30","beds":3,"baths":2,"sqft":1820,"year":1992},
         {"address":"17165 Balboa Point Way, Boca Raton, FL 33487","sold_price":800000,"sold_date":"2025-07-07","beds":3,"baths":2.5,"sqft":2304,"year":1992},
@@ -103,8 +106,9 @@ api = FastAPI()
 @api.post("/run_comps")
 def run_comps(payload=Body(...)):
     address = payload["address"]
-    condition = (payload.get("condition") or "fair").lower()
-    assignment_fee = int(payload.get("assignment_fee") or 20000)
+    condition = (payload.get("condition") or "fair").lower()            # default: fair
+    assignment_fee = int(payload.get("assignment_fee") or 20000)        # default: 20000
+    highlight = (payload.get("highlight_tier") or "aggressive").lower() # default: aggressive
 
     so = payload.get("subject_overrides") or {}
     subject = {
@@ -140,11 +144,22 @@ def run_comps(payload=Body(...)):
         your_mao  = buyer_max - assignment_fee
         mao_rows.append({"tier": f"{int(t*100)}%", "buyer_max": buyer_max, "your_mao": your_mao})
 
+    # cash lens (proxy)
     cash_ppsf = median_ppsf * 0.95
     dispo_price = round(cash_ppsf * (subject["sqft"] or 0))
 
+    # choose highlight MAO for summary
+    tier_map = {"aggressive":"65%", "standard":"70%", "hot":"75%"}
+    highlight_label = tier_map.get(highlight, "65%")
+    highlight_idx = {"65%":0, "70%":1, "75%":2}[highlight_label]
+    highlight_mao = mao_rows[highlight_idx]["your_mao"]
+
     pdf_path = generate_pdf(subject, comps, arv, condition, rehab_cost, assignment_fee, mao_rows, dispo_price)
-    return JSONResponse({"pdf_path": pdf_path, "summary": f"ARV ${arv:,} • Rehab ({condition}) ${rehab_cost:,} • Dispo ${dispo_price:,}"})
+    summary = (
+        f"ARV ${arv:,} • Rehab ({condition}) ${rehab_cost:,} • "
+        f"{highlight_label} MAO ${highlight_mao:,} • Dispo ${dispo_price:,}"
+    )
+    return JSONResponse({"pdf_path": pdf_path, "summary": summary})
 
 def run_api():
     uvicorn.run(api, host="0.0.0.0", port=PORT)
@@ -152,31 +167,48 @@ def run_api():
 # -------------------------
 # Telegram Bot
 # -------------------------
+def _parse_flags(text:str):
+    out={}
+    # accept optional flags; if missing, defaults apply (aggressive/fair/20000)
+    for k in ["fee","condition","beds","baths","sqft","year","mao"]:
+        m=re.search(rf"--{k}\s+([^\-][\S ]+?)(?=\s--|$)", text, re.I)
+        if m: out[k.lower()]=m.group(1).strip()
+    return out
+
 async def comp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     parts = text.split(None, 1)
     if len(parts) < 2:
-        await update.message.reply_text("Usage:\n/comp <address> [--condition fair|excellent|poor --fee 20000]")
+        await update.message.reply_text(
+            "Usage:\n/comp <address> [--condition excellent|fair|poor] [--fee 20000] [--mao aggressive|standard|hot]\n"
+            "Defaults if omitted → MAO: aggressive (65%), Condition: fair, Fee: 20000"
+        )
         return
 
     addr_and_flags = parts[1]
+    fl = _parse_flags(addr_and_flags)
 
-    def flags(s):
-        out={}
-        for k in ["fee","condition","beds","baths","sqft","year"]:
-            m=re.search(rf"--{k}\s+([^\-][\S ]+?)(?=\s--|$)", s, re.I)
-            if m: out[k]=m.group(1).strip()
-        return out
-
-    fl = flags(addr_and_flags)
+    # Address is everything with flags removed
     address = re.sub(r"--\w+\s+[^\-][\S ]+?(?=\s--|$)", "", addr_and_flags).strip().rstrip(",")
+    if not address:
+        await update.message.reply_text("Please include an address after /comp.")
+        return
 
-    await update.message.reply_text(f"Running comps for:\n{address}\nPlease wait…")
+    # Defaults kick in if missing
+    condition = (fl.get("condition") or "fair").lower()
+    fee = int(float(fl.get("fee") or 20000))
+    highlight = (fl.get("mao") or "aggressive").lower()
+
+    await update.message.reply_text(
+        f"Running comps for:\n{address}\n"
+        f"MAO: {highlight} • Condition: {condition} • Fee: ${fee:,}\nPlease wait…"
+    )
 
     payload = {
         "address": address,
-        "condition": (fl.get("condition") or "fair").lower(),
-        "assignment_fee": int(float(fl.get("fee") or 20000)),
+        "condition": condition,
+        "assignment_fee": fee,
+        "highlight_tier": highlight,
         "subject_overrides": {
             "beds": fl.get("beds"),
             "baths": fl.get("baths"),
@@ -201,10 +233,10 @@ async def comp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📘 *About CompsMAObot*\n"
-        "• *MAO Tiers*: Challenge 65%, Standard 70%, Hot 75% (applied to ARV).\n"
-        "• *Rehab $/sf by condition*: Excellent $20, Fair $42.5, Poor $85 (multiplied by subject sqft).\n"
-        "• *Cash lens*: Dispo ask starts ~5% under retail PPSF until TRUE CASH deeds are confirmed.\n"
-        "• *Command*: `/comp <address> [--condition excellent|fair|poor --fee 20000]`"
+        "• *MAO tiers*: aggressive 65%, standard 70%, hot 75% (applied to ARV).\n"
+        "• *Defaults* if you omit flags: MAO=aggressive, condition=fair, fee=$20,000.\n"
+        "• *Rehab $/sf*: Excellent $20, Fair $42.5, Poor $85 (× subject sqft).\n"
+        "• *Command*: `/comp <address> [--condition excellent|fair|poor] [--fee 20000] [--mao aggressive|standard|hot]`"
     )
     await update.message.reply_markdown_v2(msg)
 
