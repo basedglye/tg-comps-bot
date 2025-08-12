@@ -11,11 +11,23 @@ import uvicorn
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ---- Settings ----
-REHAB_PSF = {"excellent":20.0, "fair":42.5, "poor":85.0}
+# -------------------------
+# Config via ENV VARIABLES
+# -------------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")           # <-- set this in Railway Variables
+PORT      = int(os.getenv("PORT", "8000"))   # <-- set to 8000 in Railway Variables
+
+# Fail fast if missing
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set. Add it in Railway → Variables.")
+
+# Rehab $/sf by condition + MAO tiers
+REHAB_PSF = {"excellent": 20.0, "fair": 42.5, "poor": 85.0}
 MAO_TIERS = [0.65, 0.70, 0.75]
 
-# ---- Helpers ----
+# -------------------------
+# Helpers
+# -------------------------
 def days_since(date_str):
     d = dparser.parse(date_str).date()
     return (datetime.now(timezone.utc).date() - d).days
@@ -25,7 +37,7 @@ def score_comp(subj, comp):
     bedDiff = abs((comp.get("beds") or 0) - (subj.get("beds") or 0))
     bathDiff= abs((comp.get("baths") or 0) - (subj.get("baths") or 0))
     yrDiff  = abs((comp.get("year") or 0) - (subj.get("year") or 0)) if subj.get("year") and comp.get("year") else 0
-    sizeTerm= abs(math.log((comp.get("sqft") or 1) / max(1,(subj.get("sqft") or 1))))
+    sizeTerm= abs(math.log((comp.get("sqft") or 1) / max(1, (subj.get("sqft") or 1))))
     score = 100 - 20*min(days,365)/365 - 30*sizeTerm - 8*bedDiff - 10*bathDiff - 10*min(yrDiff,60)/60
     return max(0, round(score))
 
@@ -38,8 +50,10 @@ def comp_reasons(subj, comp):
     return " • ".join(r[:3])
 
 def fetch_portal_comps(address:str):
-    # Stub for live fetch — replace with PropStream/Redfin/County API later.
-    # Sample data for Boca example:
+    """
+    Stub data so the flow deploys cleanly.
+    Replace with your live adapters (PropStream export, Redfin/Zillow parse, county sales, etc.).
+    """
     return [
         {"address":"17267 Ventana Dr, Boca Raton, FL 33487","sold_price":650000,"sold_date":"2025-06-30","beds":3,"baths":2,"sqft":1820,"year":1992},
         {"address":"17165 Balboa Point Way, Boca Raton, FL 33487","sold_price":800000,"sold_date":"2025-07-07","beds":3,"baths":2.5,"sqft":2304,"year":1992},
@@ -47,7 +61,7 @@ def fetch_portal_comps(address:str):
     ]
 
 def verify_true_cash(comp):
-    # Placeholder for county clerk verification
+    # Hook for Clerk deed/mortgage check — returns Pending in MVP
     return {"cash_status":"Pending"}
 
 def generate_pdf(subject, comps, arv, condition, rehab_cost, assignment_fee, mao_rows, dispo_price):
@@ -86,14 +100,17 @@ def generate_pdf(subject, comps, arv, condition, rehab_cost, assignment_fee, mao
     HTML(string=html).write_pdf(tmp.name)
     return tmp.name
 
-# ---- FastAPI API ----
-app = FastAPI()
+# -------------------------
+# FastAPI (internal API)
+# -------------------------
+api = FastAPI()
 
-@app.post("/run_comps")
+@api.post("/run_comps")
 def run_comps(payload=Body(...)):
     address = payload["address"]
     condition = (payload.get("condition") or "fair").lower()
     assignment_fee = int(payload.get("assignment_fee") or 20000)
+
     so = payload.get("subject_overrides") or {}
     subject = {
         "address": address,
@@ -102,6 +119,7 @@ def run_comps(payload=Body(...)):
         "sqft": int(so.get("sqft") or 1627),
         "year": int(so.get("year") or 1992),
     }
+
     raw = fetch_portal_comps(address)
     comps=[]
     for r in raw:
@@ -111,39 +129,55 @@ def run_comps(payload=Body(...)):
         r["why"]=comp_reasons(subject, r)
         r.update(verify_true_cash(r))
         comps.append(r)
+
     comps = [c for c in comps if c.get("ppsf")]
     comps.sort(key=lambda x:(-x["score"], x["days_since_sale"]))
+
     median_ppsf = statistics.median([c["ppsf"] for c in comps])
     arv = round(median_ppsf * (subject["sqft"] or 0))
+
     rehab_psf = REHAB_PSF.get(condition, REHAB_PSF["fair"])
     rehab_cost = round((subject["sqft"] or 0) * rehab_psf)
+
     mao_rows=[]
     for t in MAO_TIERS:
         buyer_max = round(arv*t - rehab_cost)
         your_mao  = buyer_max - assignment_fee
         mao_rows.append({"tier": f"{int(t*100)}%", "buyer_max": buyer_max, "your_mao": your_mao})
+
     cash_ppsf = median_ppsf * 0.95
     dispo_price = round(cash_ppsf * (subject["sqft"] or 0))
+
     pdf_path = generate_pdf(subject, comps, arv, condition, rehab_cost, assignment_fee, mao_rows, dispo_price)
     return JSONResponse({"pdf_path": pdf_path, "summary": f"ARV ${arv:,} • Rehab ({condition}) ${rehab_cost:,} • Dispo ${dispo_price:,}"})
 
-# ---- Telegram Bot ----
+def run_api():
+    uvicorn.run(api, host="0.0.0.0", port=PORT)
+
+# -------------------------
+# Telegram Bot
+# -------------------------
 async def comp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     parts = text.split(None, 1)
     if len(parts) < 2:
         await update.message.reply_text("Usage:\n/comp <address> [--condition fair|excellent|poor --fee 20000]")
         return
+
     addr_and_flags = parts[1]
+
     def flags(s):
         out={}
         for k in ["fee","condition","beds","baths","sqft","year"]:
             m=re.search(rf"--{k}\s+([^\-][\S ]+?)(?=\s--|$)", s, re.I)
             if m: out[k]=m.group(1).strip()
         return out
+
     fl = flags(addr_and_flags)
     address = re.sub(r"--\w+\s+[^\-][\S ]+?(?=\s--|$)", "", addr_and_flags).strip().rstrip(",")
+
     await update.message.reply_text(f"Running comps for:\n{address}\nPlease wait…")
+
     payload = {
         "address": address,
         "condition": (fl.get("condition") or "fair").lower(),
@@ -155,26 +189,27 @@ async def comp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "year": fl.get("year"),
         }
     }
-    base = f"http://127.0.0.1:{int(os.getenv('PORT', '8000'))}"
+
+    # Call our local API inside the same container
+    base = f"http://127.0.0.1:{PORT}"
     r = requests.post(f"{base}/run_comps", json=payload, timeout=60)
     data = r.json()
+
     pdf_path = data.get("pdf_path")
     with open(pdf_path, "rb") as f:
         b = io.BytesIO(f.read())
         b.name = "comps_report.pdf"
         await context.bot.send_document(chat_id=update.effective_chat.id, document=InputFile(b))
+
     if "summary" in data:
         await update.message.reply_text(data["summary"])
 
 def run_bot():
-    token = os.environ["BOT_TOKEN"]
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("comp", comp_cmd))
     app.run_polling()
 
-def run_api():
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT","8000")))
-
 if __name__ == "__main__":
+    # Run API in a background thread, then start the bot
     threading.Thread(target=run_api, daemon=True).start()
     run_bot()
